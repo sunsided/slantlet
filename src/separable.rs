@@ -99,17 +99,31 @@ fn apply(
     for row in x.chunks_exact_mut(width) {
         apply_pieces(row, frame_w, f, &mut scratch);
     }
-    let mut col = vec![0.0; height];
-    for c in 0..width {
-        for (r, v) in col.iter_mut().enumerate() {
-            *v = x[r * width + c];
+    // Columns in batches, so gathering and scattering read and write whole
+    // row segments instead of striding through memory once per column.
+    let batch = COLUMN_BATCH.min(width);
+    let mut cols = vec![0.0; batch * height];
+    for c0 in (0..width).step_by(batch) {
+        let b = batch.min(width - c0);
+        for (r, row) in x.chunks_exact(width).enumerate() {
+            for (j, &v) in row[c0..c0 + b].iter().enumerate() {
+                cols[j * height + r] = v;
+            }
         }
-        apply_pieces(&mut col, frame_h, f, &mut scratch);
-        for (r, v) in col.iter().enumerate() {
-            x[r * width + c] = *v;
+        for col in cols[..b * height].chunks_exact_mut(height) {
+            apply_pieces(col, frame_h, f, &mut scratch);
+        }
+        for (r, row) in x.chunks_exact_mut(width).enumerate() {
+            for (j, v) in row[c0..c0 + b].iter_mut().enumerate() {
+                *v = cols[j * height + r];
+            }
         }
     }
 }
+
+/// Columns gathered per pass: 8 `f64` = one 64-byte cache line per row
+/// segment. Measured best of 4–128 on the BENCH.md machine.
+const COLUMN_BATCH: usize = 8;
 
 #[cfg(test)]
 mod tests {

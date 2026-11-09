@@ -14,6 +14,8 @@ vanishing moments, and have shorter support than the Daubechies-2 wavelet.
 - The basis is orthonormal, so energy is preserved and `inverse` is the transpose of `forward`.
 - Linear signals (`a + b·n`) produce zero detail coefficients.
 - Coefficients match the paper's slantlet matrix (Sec. II-F, Fig. 5) exactly.
+- O(N) and fast: roughly 500–800 million samples/s on a laptop CPU; see
+  [BENCH.md](BENCH.md) for numbers and the hardware they were measured on.
 - No dependencies.
 
 ```rust

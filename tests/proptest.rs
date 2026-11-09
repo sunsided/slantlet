@@ -121,3 +121,51 @@ proptest! {
         prop_assert_eq!(&whole[..full], &streamed[..full]);
     }
 }
+
+fn image() -> impl Strategy<Value = (Vec<f64>, usize, usize)> {
+    (0usize..40, 0usize..40)
+        .prop_flat_map(|(w, h)| (prop::collection::vec(-1e6f64..1e6, w * h), Just(w), Just(h)))
+}
+
+proptest! {
+    #[test]
+    fn separable_2d_roundtrip_any_size((x, w, h) in image(), k in 0u32..=6) {
+        let mut y = x.clone();
+        slantlet::forward_2d_frames(&mut y, w, h, 1 << k).unwrap();
+        let t = tol(&x);
+        prop_assert!((norm(&x) - norm(&y)).abs() <= t);
+        slantlet::inverse_2d_frames(&mut y, w, h, 1 << k).unwrap();
+        for (a, b) in y.iter().zip(&x) {
+            prop_assert!((a - b).abs() <= t);
+        }
+    }
+
+    #[test]
+    fn planar_2d_roundtrip(
+        x in (0u32..=6).prop_flat_map(|l| prop::collection::vec(-1e6f64..1e6, 1usize << (2 * l))),
+    ) {
+        let side = x.len().isqrt();
+        let mut y = x.clone();
+        slantlet::forward_2d_planar(&mut y, side).unwrap();
+        let t = tol(&x);
+        prop_assert!((norm(&x) - norm(&y)).abs() <= t);
+        slantlet::inverse_2d_planar(&mut y, side).unwrap();
+        for (a, b) in y.iter().zip(&x) {
+            prop_assert!((a - b).abs() <= t);
+        }
+    }
+
+    /// Planes a + b·n1 + c·n2 leave only the three coarse coefficients.
+    #[test]
+    fn planar_2d_annihilates_planes(l in 1u32..=6, a in -1e3f64..1e3, b in -1e3f64..1e3, c in -1e3f64..1e3) {
+        let side = 1usize << l;
+        let mut x: Vec<f64> = (0..side * side)
+            .map(|i| a + b * (i % side) as f64 + c * (i / side) as f64)
+            .collect();
+        let t = 1e-12 * (1.0 + norm(&x));
+        slantlet::forward_2d_planar(&mut x, side).unwrap();
+        for v in &x[3.min(x.len())..] {
+            prop_assert!(v.abs() <= t);
+        }
+    }
+}

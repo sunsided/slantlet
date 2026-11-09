@@ -53,6 +53,21 @@
 //! and lossless, and frame detail coefficients equal the filterbank's on the
 //! whole signal.
 //!
+//! # Two dimensions
+//!
+//! - [`forward_2d`] / [`inverse_2d`] (and the `_frames` variants for any
+//!   size) are the separable extension: the 1-D transform along every row,
+//!   then every column. Exactly the tensor product of two 1-D slantlet bases.
+//! - [`forward_2d_planar`] / [`inverse_2d_planar`] build the non-separable
+//!   2-D slantlet outlined in the paper's Sec. II-L for square power-of-two
+//!   images. Its detail functions live on aligned squares of side `2^(i+1)`,
+//!   are planar on each quadrant, and annihilate planes `a·n1 + b·n2 + c` but
+//!   not `n1·n2`. The paper never published the exact filters, so the choice
+//!   of detail basis is this crate's own; see the function docs.
+//!
+//! As the paper notes, slantlets suit piecewise-linear data; they are not
+//! meant for compressing natural images.
+//!
 //! # Algorithm
 //!
 //! Piecewise-linear basis functions only need each half-block's projection on
@@ -75,11 +90,27 @@
 use std::f64::consts::{FRAC_1_SQRT_2, SQRT_2};
 use std::fmt;
 
-/// Error returned when the input length is not a positive power of two.
+mod planar;
+mod separable;
+
+pub use planar::{forward_2d_planar, inverse_2d_planar};
+pub use separable::{forward_2d, forward_2d_frames, inverse_2d, inverse_2d_frames};
+
+/// Errors for invalid input shapes. On error the input is left unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
-    /// The slice length; must be `2^l` for some `l >= 0`.
+    /// A length, frame length or side that must be `2^l` (`l >= 0`) is not.
     LengthNotPowerOfTwo(usize),
+    /// The slice length is not `width * height`.
+    DimensionMismatch {
+        /// Slice length.
+        len: usize,
+        /// Requested width (samples per row).
+        width: usize,
+        /// Requested height (rows).
+        height: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -87,6 +118,12 @@ impl fmt::Display for Error {
         match self {
             Error::LengthNotPowerOfTwo(n) => {
                 write!(f, "slantlet transform needs a power-of-two length, got {n}")
+            }
+            Error::DimensionMismatch { len, width, height } => {
+                write!(
+                    f,
+                    "slice of length {len} does not hold {width}x{height} samples"
+                )
             }
         }
     }
@@ -99,6 +136,14 @@ fn check_len(n: usize) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::LengthNotPowerOfTwo(n))
+    }
+}
+
+fn check_dims(len: usize, width: usize, height: usize) -> Result<(), Error> {
+    if width.checked_mul(height) == Some(len) {
+        Ok(())
+    } else {
+        Err(Error::DimensionMismatch { len, width, height })
     }
 }
 
@@ -254,15 +299,25 @@ fn for_each_piece(
     f: fn(&mut [f64], &mut [f64]),
 ) -> Result<(), Error> {
     check_len(frame_len)?;
-    let mut scratch = vec![0.0; frame_len.min(x.len())];
+    apply_pieces(x, frame_len, f, &mut vec![0.0; frame_len.min(x.len())]);
+    Ok(())
+}
+
+/// Applies `f` to the frames and tail pieces of `x`; `frame_len` must be a
+/// power of two and `scratch` at least `min(frame_len, x.len())` long.
+fn apply_pieces(
+    x: &mut [f64],
+    frame_len: usize,
+    f: fn(&mut [f64], &mut [f64]),
+    scratch: &mut [f64],
+) {
     let mut rest = x;
     while !rest.is_empty() {
         let n = frame_len.min(1 << rest.len().ilog2());
         let (piece, tail) = rest.split_at_mut(n);
-        f(piece, &mut scratch);
+        f(piece, scratch);
         rest = tail;
     }
-    Ok(())
 }
 
 #[cfg(test)]

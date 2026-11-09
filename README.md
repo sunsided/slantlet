@@ -7,6 +7,10 @@ vanishing moments, and have shorter support than the Daubechies-2 wavelet.
 - Forward and inverse transforms work in place in `O(N)`, for any power-of-two length.
 - `forward_frames` / `inverse_frames` handle any length (or a stream) frame by
   frame, losslessly and without padding.
+- 2-D: separable (`forward_2d`, any size via `forward_2d_frames`) and a
+  non-separable, plane-annihilating variant (`forward_2d_planar`) following
+  the paper's outline (Sec. II-L); its exact detail basis is this crate's own
+  choice, as the paper never published one.
 - The basis is orthonormal, so energy is preserved and `inverse` is the transpose of `forward`.
 - Linear signals (`a + b·n`) produce zero detail coefficients.
 - Coefficients match the paper's slantlet matrix (Sec. II-F, Fig. 5) exactly.

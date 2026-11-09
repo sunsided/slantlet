@@ -253,3 +253,12 @@ fn golden_pins_reference() {
     assert_matrix(&paper_matrix(3), &golden::MATRIX_8, "reference");
     assert_matrix(&paper_matrix(4), &golden::MATRIX_16, "reference");
 }
+
+#[test]
+fn golden_pins_planar_2d() {
+    let mut y = golden::planar_input();
+    slantlet::forward_2d_planar(&mut y, 8).unwrap();
+    for (i, (a, b)) in y.iter().zip(golden::PLANAR8_COEFFS).enumerate() {
+        assert!((a - b).abs() < 1e-13, "planar8[{i}]: {a} vs golden {b}");
+    }
+}

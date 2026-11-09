@@ -75,6 +75,11 @@
 //! orthogonal map per block, so both directions run in `O(N)` time with an
 //! `O(N)` scratch buffer.
 //!
+//! Levels are cache-blocked: after one streaming pass over the input, all
+//! levels inside each 2048-sample chunk run while the chunk is in L1/L2, and
+//! only the few coarse levels above touch the whole signal. The output does
+//! not depend on the block size. The README describes this in detail.
+//!
 //! # Example
 //!
 //! ```
@@ -160,40 +165,306 @@ fn rotation(m: usize) -> (f64, f64) {
 /// `x.len()` must be a power of two (including 1). On error `x` is unchanged.
 pub fn forward(x: &mut [f64]) -> Result<(), Error> {
     check_len(x.len())?;
-    forward_with(x, &mut vec![0.0; x.len()]);
+    forward_with(x, &mut vec![0.0; scratch_len(x.len())]);
     Ok(())
 }
 
-/// [`forward`] for a power-of-two `x`, using `scratch[..x.len()]`.
+/// Inverse Slantlet transform, in place.
+///
+/// `y.len()` must be a power of two (including 1). On error `y` is unchanged.
+pub fn inverse(y: &mut [f64]) -> Result<(), Error> {
+    check_len(y.len())?;
+    inverse_with(y, &mut vec![0.0; scratch_len(y.len())]);
+    Ok(())
+}
+
+/// `(c, d)` pairs per cache block. All levels inside a block run while it is
+/// in L1/L2; only the few coarse levels above it touch the whole signal.
+const BLOCK_PAIRS: usize = 1024;
+
+/// Scratch needed by [`forward_with`] / [`inverse_with`] for length `n`
+/// (monotonic in `n`).
+fn scratch_len(n: usize) -> usize {
+    n + (n / 2).min(BLOCK_PAIRS)
+}
+
+/// Whether a single 1-D transform of `n` samples runs in parallel.
+fn par_single(n: usize) -> bool {
+    #[cfg(feature = "rayon")]
+    return parallel(n, par_min::SINGLE);
+    #[cfg(not(feature = "rayon"))]
+    {
+        let _ = n;
+        false
+    }
+}
+
+/// [`forward`] for a power-of-two `x`, using `scratch[..scratch_len(x.len())]`.
 fn forward_with(x: &mut [f64], scratch: &mut [f64]) {
+    forward_blocked(x, scratch, BLOCK_PAIRS, par_single(x.len()));
+}
+
+/// [`inverse`] for a power-of-two `y`, using `scratch[..scratch_len(y.len())]`.
+fn inverse_with(y: &mut [f64], scratch: &mut [f64]) {
+    inverse_blocked(y, scratch, BLOCK_PAIRS, par_single(y.len()));
+}
+
+/// One forward level on disjoint slices: children `(cs, ds)` (length `2k`)
+/// merge into parents `(cp, dp)` (length `k`), emitting `g, Jg` pairs into
+/// `out` (length `2k`). Disjointness lets the compiler vectorise the loop.
+#[inline]
+fn merge_level(
+    cs: &[f64],
+    ds: &[f64],
+    cp: &mut [f64],
+    dp: &mut [f64],
+    out: &mut [f64],
+    (alpha, beta): (f64, f64),
+) {
+    let k = cp.len();
+    let (cs, ds, dp, out) = (&cs[..2 * k], &ds[..2 * k], &mut dp[..k], &mut out[..2 * k]);
+    for b in 0..k {
+        let (cl, cr, dl, dr) = (cs[2 * b], cs[2 * b + 1], ds[2 * b], ds[2 * b + 1]);
+        let dc = cr - cl;
+        let sd = dl + dr;
+        let s = (dr - dl) * FRAC_1_SQRT_2;
+        let a = (beta * dc - alpha * sd) * FRAC_1_SQRT_2;
+        // Reference sign: g = -(ŝ + â)/√2, Jg = -(ŝ - â)/√2.
+        out[2 * b] = -(s + a) * FRAC_1_SQRT_2;
+        out[2 * b + 1] = -(s - a) * FRAC_1_SQRT_2;
+        cp[b] = (cl + cr) * FRAC_1_SQRT_2;
+        dp[b] = (alpha * dc + beta * sd) * FRAC_1_SQRT_2;
+    }
+}
+
+/// Inverse of [`merge_level`]: parents `(cp, dp)` and details `det` expand
+/// into children `(cs, ds)`.
+#[inline]
+fn split_level(
+    cp: &[f64],
+    dp: &[f64],
+    det: &[f64],
+    cs: &mut [f64],
+    ds: &mut [f64],
+    (alpha, beta): (f64, f64),
+) {
+    let k = cp.len();
+    let (dp, det, cs, ds) = (&dp[..k], &det[..2 * k], &mut cs[..2 * k], &mut ds[..2 * k]);
+    for b in 0..k {
+        let (g, jg) = (-det[2 * b], -det[2 * b + 1]);
+        let s = (g + jg) * FRAC_1_SQRT_2;
+        let a = (g - jg) * FRAC_1_SQRT_2;
+        // [[α, β], [β, -α]] is its own inverse.
+        let dc = (alpha * dp[b] + beta * a) * SQRT_2;
+        let sd = (beta * dp[b] - alpha * a) * SQRT_2;
+        let sc = cp[b] * SQRT_2;
+        let dd = s * SQRT_2;
+        cs[2 * b] = (sc - dc) * 0.5;
+        cs[2 * b + 1] = (sc + dc) * 0.5;
+        ds[2 * b] = (sd - dd) * 0.5;
+        ds[2 * b + 1] = (sd + dd) * 0.5;
+    }
+}
+
+/// Minimum sizes for the parallel paths (feature `rayon`), measured on the
+/// BENCH.md machine. Below them, thread overhead outweighs the gain.
+#[cfg(feature = "rayon")]
+mod par_min {
+    /// One 1-D transform: blocks share memory bandwidth, so it needs to be big.
+    pub const SINGLE: usize = 1 << 19;
+    /// Frame-wise 1-D: frames are fully independent.
+    pub const FRAMES: usize = 1 << 15;
+    /// Separable 2-D, in samples.
+    pub const SEPARABLE: usize = 1 << 17;
+}
+
+/// Whether work on `n` samples with threshold `min` should run in parallel.
+#[cfg(feature = "rayon")]
+fn parallel(n: usize, min: usize) -> bool {
+    n >= min
+}
+
+/// Where a block writes its detail coefficients, level by level.
+trait BlockOut {
+    /// Output slice (length `len`) for the level whose children have length
+    /// `m`; `j` counts levels from the finest (`m = 2`).
+    fn level(&mut self, j: usize, m: usize, len: usize) -> &mut [f64];
+}
+
+/// Sequential: block `k` writes straight into the full coefficient vector.
+struct Direct<'a> {
+    x: &'a mut [f64],
+    k: usize,
+}
+
+impl BlockOut for Direct<'_> {
+    fn level(&mut self, _j: usize, m: usize, len: usize) -> &mut [f64] {
+        let o = self.x.len() / m + self.k * len;
+        &mut self.x[o..o + len]
+    }
+}
+
+/// Parallel: pre-split, disjoint per-level slices of one block.
+impl BlockOut for Vec<&mut [f64]> {
+    fn level(&mut self, j: usize, _m: usize, _len: usize) -> &mut [f64] {
+        self[j]
+    }
+}
+
+/// Runs every forward level inside one block of `cb.len()` pairs and leaves
+/// the block's `(c, d)` in `cb[0]`, `db[0]`. Levels ping-pong between the
+/// block and `tmp` so source and destination never alias.
+fn forward_block(cb: &mut [f64], db: &mut [f64], tmp: &mut [f64], out: &mut impl BlockOut) {
+    let blk = cb.len();
+    let (tc, td) = tmp[..blk].split_at_mut(blk / 2);
+    let (mut len, mut m, mut j, mut in_block) = (blk, 2, 0, true);
+    while len > 1 {
+        let nb = len / 2;
+        let o = out.level(j, m, 2 * nb);
+        if in_block {
+            merge_level(cb, db, &mut tc[..nb], &mut td[..nb], o, rotation(m));
+        } else {
+            merge_level(tc, td, &mut cb[..nb], &mut db[..nb], o, rotation(m));
+        }
+        (len, m, j, in_block) = (nb, 2 * m, j + 1, !in_block);
+    }
+    if !in_block {
+        (cb[0], db[0]) = (tc[0], td[0]);
+    }
+}
+
+/// Inverse of [`forward_block`] for block `k`: expands `(cb[0], db[0])` into
+/// the block's `cb.len()` pairs, reading details from the coefficients `y`.
+fn inverse_block(cb: &mut [f64], db: &mut [f64], tmp: &mut [f64], y: &[f64], k: usize) {
+    let (n, blk) = (y.len(), cb.len());
+    let (tc, td) = tmp[..blk].split_at_mut(blk / 2);
+    // Start where an even number of ping-pong steps ends in the block.
+    let mut in_block = blk.trailing_zeros() % 2 == 0;
+    if !in_block {
+        (tc[0], td[0]) = (cb[0], db[0]);
+    }
+    let (mut len, mut m) = (1, blk);
+    while len < blk {
+        let o = n / m + 2 * k * len;
+        let det = &y[o..o + 2 * len];
+        if in_block {
+            split_level(
+                &cb[..len],
+                &db[..len],
+                det,
+                &mut tc[..2 * len],
+                &mut td[..2 * len],
+                rotation(m),
+            );
+        } else {
+            split_level(
+                &tc[..len],
+                &td[..len],
+                det,
+                &mut cb[..2 * len],
+                &mut db[..2 * len],
+                rotation(m),
+            );
+        }
+        (len, m, in_block) = (2 * len, m / 2, !in_block);
+    }
+}
+
+/// Splits the detail region written by the blocked levels (`x[n/blk..]`)
+/// into disjoint per-block slices, finest level first.
+#[cfg(feature = "rayon")]
+fn block_outputs(x: &mut [f64], blk: usize) -> Vec<Vec<&mut [f64]>> {
+    let n = x.len();
+    let blocks = n / 2 / blk;
+    let mut per_block: Vec<Vec<&mut [f64]>> = (0..blocks).map(|_| Vec::new()).collect();
+    let mut rest = &mut x[n / blk..];
+    let mut m = blk; // level regions [n/m, 2n/m) follow each other upwards
+    while m >= 2 {
+        let (region, tail) = rest.split_at_mut(n / m);
+        rest = tail;
+        for (outs, chunk) in per_block.iter_mut().zip(region.chunks_mut(n / m / blocks)) {
+            outs.push(chunk);
+        }
+        m /= 2;
+    }
+    for outs in &mut per_block {
+        outs.reverse();
+    }
+    per_block
+}
+
+/// Forward transform with cache blocks of `blk` pairs (a power of two).
+///
+/// 1. Stream samples into per-pair constants `c` and ramps `d`.
+/// 2. Per block of `blk` pairs, run every level that fits inside it
+///    ([`forward_block`]); blocks are independent and run in parallel when
+///    `par` is set.
+/// 3. Gather each block's result into slot `k` and merge the remaining
+///    `n / (2 blk)` slots level by level, in place.
+fn forward_blocked(x: &mut [f64], scratch: &mut [f64], blk: usize, par: bool) {
     let n = x.len();
     if n < 2 {
         return;
     }
+    let pairs = n / 2;
+    let blk = blk.min(pairs);
+    let (c, rest) = scratch.split_at_mut(pairs);
+    let (d, rest) = rest.split_at_mut(pairs);
 
-    // c[k], d[k]: projection of block k onto its unit constant and unit ramp.
-    let (c, d) = scratch[..n].split_at_mut(n / 2);
-    for (k, p) in x.chunks_exact(2).enumerate() {
-        c[k] = (p[0] + p[1]) * FRAC_1_SQRT_2;
-        d[k] = (p[1] - p[0]) * FRAC_1_SQRT_2;
+    let pair = |p: &[f64], c: &mut f64, d: &mut f64| {
+        *c = (p[0] + p[1]) * FRAC_1_SQRT_2;
+        *d = (p[1] - p[0]) * FRAC_1_SQRT_2;
+    };
+    #[cfg(feature = "rayon")]
+    if par {
+        use rayon::prelude::*;
+        x.par_chunks_exact(2)
+            .zip(c.par_iter_mut().zip(d.par_iter_mut()))
+            .for_each(|(p, (c, d))| pair(p, c, d));
+        let outs = block_outputs(x, blk);
+        c.par_chunks_mut(blk)
+            .zip(d.par_chunks_mut(blk))
+            .zip(outs)
+            .for_each_init(
+                || vec![0.0; blk],
+                |tmp, ((cb, db), mut out)| forward_block(cb, db, tmp, &mut out),
+            );
+    }
+    if !(cfg!(feature = "rayon") && par) {
+        for (p, (c, d)) in x.chunks_exact(2).zip(c.iter_mut().zip(d.iter_mut())) {
+            pair(p, c, d);
+        }
+        let tmp = &mut rest[..blk];
+        for k in 0..pairs / blk {
+            let (cb, db) = (
+                &mut c[k * blk..(k + 1) * blk],
+                &mut d[k * blk..(k + 1) * blk],
+            );
+            forward_block(cb, db, tmp, &mut Direct { x: &mut *x, k });
+        }
+    }
+    // Gather block results; slot k lies in an earlier, consumed block.
+    for k in 1..pairs / blk {
+        (c[k], d[k]) = (c[k * blk], d[k * blk]);
     }
 
-    let mut m = 2; // half-block length
+    let mut m = 2 * blk; // child length of the first level above the blocks
     while m < n {
         let nb = n / (2 * m);
         let base = n / m;
-        let (alpha, beta) = rotation(m);
+        let r = rotation(m);
         for b in 0..nb {
             let (cl, dl, cr, dr) = (c[2 * b], d[2 * b], c[2 * b + 1], d[2 * b + 1]);
-            let dc = cr - cl;
-            let sd = dl + dr;
-            let s = (dr - dl) * FRAC_1_SQRT_2;
-            let a = (beta * dc - alpha * sd) * FRAC_1_SQRT_2;
-            // Reference sign: g = -(ŝ + â)/√2, Jg = -(ŝ - â)/√2.
-            x[base + 2 * b] = -(s + a) * FRAC_1_SQRT_2;
-            x[base + 2 * b + 1] = -(s - a) * FRAC_1_SQRT_2;
-            c[b] = (cl + cr) * FRAC_1_SQRT_2;
-            d[b] = (alpha * dc + beta * sd) * FRAC_1_SQRT_2;
+            let (mut cp, mut dp) = ([0.0], [0.0]);
+            merge_level(
+                &[cl, cr],
+                &[dl, dr],
+                &mut cp,
+                &mut dp,
+                &mut x[base + 2 * b..],
+                r,
+            );
+            (c[b], d[b]) = (cp[0], dp[0]);
         }
         m *= 2;
     }
@@ -202,53 +473,72 @@ fn forward_with(x: &mut [f64], scratch: &mut [f64]) {
     x[1] = -d[0]; // reference f is the descending ramp
 }
 
-/// Inverse Slantlet transform, in place.
-///
-/// `y.len()` must be a power of two (including 1). On error `y` is unchanged.
-pub fn inverse(y: &mut [f64]) -> Result<(), Error> {
-    check_len(y.len())?;
-    inverse_with(y, &mut vec![0.0; y.len()]);
-    Ok(())
-}
-
-/// [`inverse`] for a power-of-two `y`, using `scratch[..y.len()]`.
-fn inverse_with(y: &mut [f64], scratch: &mut [f64]) {
+/// Inverse of [`forward_blocked`] with the same block size.
+fn inverse_blocked(y: &mut [f64], scratch: &mut [f64], blk: usize, par: bool) {
     let n = y.len();
     if n < 2 {
         return;
     }
+    let pairs = n / 2;
+    let blk = blk.min(pairs);
+    let (c, rest) = scratch.split_at_mut(pairs);
+    let (d, rest) = rest.split_at_mut(pairs);
 
-    let (c, d) = scratch[..n].split_at_mut(n / 2);
     c[0] = y[0];
     d[0] = -y[1];
 
     let mut m = n / 2;
-    while m >= 2 {
+    while m >= 2 * blk {
         let nb = n / (2 * m);
         let base = n / m;
-        let (alpha, beta) = rotation(m);
+        let r = rotation(m);
         // Descending b: block b reads slot b and writes slots 2b, 2b+1 >= b.
         for b in (0..nb).rev() {
-            let (cc, r) = (c[b], d[b]);
-            let (g, jg) = (-y[base + 2 * b], -y[base + 2 * b + 1]);
-            let s = (g + jg) * FRAC_1_SQRT_2;
-            let a = (g - jg) * FRAC_1_SQRT_2;
-            // [[α, β], [β, -α]] is its own inverse.
-            let dc = (alpha * r + beta * a) * SQRT_2;
-            let sd = (beta * r - alpha * a) * SQRT_2;
-            let sc = cc * SQRT_2;
-            let dd = s * SQRT_2;
-            c[2 * b] = (sc - dc) * 0.5;
-            c[2 * b + 1] = (sc + dc) * 0.5;
-            d[2 * b] = (sd - dd) * 0.5;
-            d[2 * b + 1] = (sd + dd) * 0.5;
+            let (mut cs, mut ds) = ([0.0; 2], [0.0; 2]);
+            let det = &y[base + 2 * b..base + 2 * b + 2];
+            split_level(&[c[b]], &[d[b]], det, &mut cs, &mut ds, r);
+            (c[2 * b], c[2 * b + 1], d[2 * b], d[2 * b + 1]) = (cs[0], cs[1], ds[0], ds[1]);
         }
         m /= 2;
     }
 
-    for (k, p) in y.chunks_exact_mut(2).enumerate() {
-        p[0] = (c[k] - d[k]) * FRAC_1_SQRT_2;
-        p[1] = (c[k] + d[k]) * FRAC_1_SQRT_2;
+    // Seed each block with its slot; descending k reads slot k before any
+    // block at or below it is overwritten.
+    for k in (1..pairs / blk).rev() {
+        (c[k * blk], d[k * blk]) = (c[k], d[k]);
+    }
+
+    let unpair = |p: &mut [f64], c: f64, d: f64| {
+        p[0] = (c - d) * FRAC_1_SQRT_2;
+        p[1] = (c + d) * FRAC_1_SQRT_2;
+    };
+    #[cfg(feature = "rayon")]
+    if par {
+        use rayon::prelude::*;
+        let coeffs = &*y;
+        c.par_chunks_mut(blk)
+            .zip(d.par_chunks_mut(blk))
+            .enumerate()
+            .for_each_init(
+                || vec![0.0; blk],
+                |tmp, (k, (cb, db))| inverse_block(cb, db, tmp, coeffs, k),
+            );
+        y.par_chunks_exact_mut(2)
+            .zip(c.par_iter().zip(d.par_iter()))
+            .for_each(|(p, (&c, &d))| unpair(p, c, d));
+    }
+    if !(cfg!(feature = "rayon") && par) {
+        let tmp = &mut rest[..blk];
+        for k in 0..pairs / blk {
+            let (cb, db) = (
+                &mut c[k * blk..(k + 1) * blk],
+                &mut d[k * blk..(k + 1) * blk],
+            );
+            inverse_block(cb, db, tmp, y, k);
+        }
+        for (p, (&c, &d)) in y.chunks_exact_mut(2).zip(c.iter().zip(d.iter())) {
+            unpair(p, c, d);
+        }
     }
 }
 
@@ -299,12 +589,29 @@ fn for_each_piece(
     f: fn(&mut [f64], &mut [f64]),
 ) -> Result<(), Error> {
     check_len(frame_len)?;
-    apply_pieces(x, frame_len, f, &mut vec![0.0; frame_len.min(x.len())]);
+    #[cfg(feature = "rayon")]
+    if parallel(x.len(), par_min::FRAMES) && x.len() >= 2 * frame_len {
+        use rayon::prelude::*;
+        let full = x.len() / frame_len * frame_len;
+        let (frames, tail) = x.split_at_mut(full);
+        frames
+            .par_chunks_mut(frame_len)
+            .for_each_init(|| vec![0.0; scratch_len(frame_len)], |s, fr| f(fr, s));
+        apply_pieces(tail, frame_len, f, &mut vec![0.0; scratch_len(tail.len())]);
+        return Ok(());
+    }
+    apply_pieces(
+        x,
+        frame_len,
+        f,
+        &mut vec![0.0; scratch_len(frame_len.min(x.len()))],
+    );
     Ok(())
 }
 
 /// Applies `f` to the frames and tail pieces of `x`; `frame_len` must be a
-/// power of two and `scratch` at least `min(frame_len, x.len())` long.
+/// power of two and `scratch` at least `scratch_len(min(frame_len, x.len()))`
+/// long.
 fn apply_pieces(
     x: &mut [f64],
     frame_len: usize,
@@ -550,6 +857,33 @@ mod tests {
         }
         assert_eq!(x, [1.0, 2.0, 3.0]);
         forward_frames(&mut [], 8).unwrap();
+    }
+
+    /// Cache blocking and parallelism must not change a single bit: every
+    /// block size, sequential or parallel, gives the same output as one block
+    /// spanning the whole signal.
+    #[test]
+    fn block_size_and_threads_do_not_change_results() {
+        for l in 1..=16 {
+            let n = 1usize << l;
+            let x: Vec<f64> = (0..n)
+                .map(|t| ((t * 37 % 101) as f64 - 50.0).sin())
+                .collect();
+            let mut want = x.clone();
+            forward_blocked(&mut want, &mut vec![0.0; 2 * n], n, false);
+            let mut back = want.clone();
+            inverse_blocked(&mut back, &mut vec![0.0; 2 * n], n, false);
+            for blk in (0..=l).map(|b| 1usize << b) {
+                for par in [false, cfg!(feature = "rayon")] {
+                    let mut y = x.clone();
+                    forward_blocked(&mut y, &mut vec![0.0; 2 * n], blk, par);
+                    assert_eq!(y, want, "forward n={n} blk={blk} par={par}");
+                    inverse_blocked(&mut y, &mut vec![0.0; 2 * n], blk, par);
+                    assert_eq!(y, back, "inverse n={n} blk={blk} par={par}");
+                }
+            }
+            assert_close(&back, &x, 1e-12);
+        }
     }
 
     #[test]

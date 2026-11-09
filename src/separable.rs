@@ -1,7 +1,7 @@
 //! Separable 2-D slantlet transform: the 1-D transform along every row, then
 //! along every column.
 
-use crate::{Error, apply_pieces, check_dims, check_len, forward_with, inverse_with};
+use crate::{Error, apply_pieces, check_dims, check_len, forward_with, inverse_with, scratch_len};
 
 /// Separable 2-D forward transform of a row-major `width × height` array, in
 /// place.
@@ -95,7 +95,12 @@ fn apply(
     if x.is_empty() {
         return;
     }
-    let mut scratch = vec![0.0; frame_w.min(width).max(frame_h.min(height))];
+    #[cfg(feature = "rayon")]
+    if crate::parallel(x.len(), crate::par_min::SEPARABLE) {
+        apply_parallel(x, width, height, frame_w, frame_h, f);
+        return;
+    }
+    let mut scratch = vec![0.0; scratch_len(frame_w.min(width).max(frame_h.min(height)))];
     for row in x.chunks_exact_mut(width) {
         apply_pieces(row, frame_w, f, &mut scratch);
     }
@@ -119,6 +124,55 @@ fn apply(
             }
         }
     }
+}
+
+/// [`apply`] on all cores: rows in parallel, then columns through a
+/// transposed copy so every task reads and writes contiguous memory.
+#[cfg(feature = "rayon")]
+fn apply_parallel(
+    x: &mut [f64],
+    width: usize,
+    height: usize,
+    frame_w: usize,
+    frame_h: usize,
+    f: fn(&mut [f64], &mut [f64]),
+) {
+    use rayon::prelude::*;
+    x.par_chunks_mut(width).for_each_init(
+        || vec![0.0; scratch_len(frame_w.min(width))],
+        |s, row| apply_pieces(row, frame_w, f, s),
+    );
+    // t holds the columns of x as rows; each task gathers COLUMN_BATCH of them.
+    let mut t = vec![0.0; width * height];
+    let xs = &*x;
+    t.par_chunks_mut(COLUMN_BATCH * height)
+        .enumerate()
+        .for_each_init(
+            || vec![0.0; scratch_len(frame_h.min(height))],
+            |s, (i, cols)| {
+                let c0 = i * COLUMN_BATCH;
+                for (r, row) in xs.chunks_exact(width).enumerate() {
+                    for (j, &v) in row[c0..c0 + cols.len() / height].iter().enumerate() {
+                        cols[j * height + r] = v;
+                    }
+                }
+                for col in cols.chunks_exact_mut(height) {
+                    apply_pieces(col, frame_h, f, s);
+                }
+            },
+        );
+    // Scatter back COLUMN_BATCH rows per task, reading contiguous runs of t.
+    x.par_chunks_mut(COLUMN_BATCH * width)
+        .enumerate()
+        .for_each(|(i, rows)| {
+            let r0 = i * COLUMN_BATCH;
+            let nr = rows.len() / width;
+            for (c, col) in t.chunks_exact(height).enumerate() {
+                for (k, &v) in col[r0..r0 + nr].iter().enumerate() {
+                    rows[k * width + c] = v;
+                }
+            }
+        });
 }
 
 /// Columns gathered per pass: 8 `f64` = one 64-byte cache line per row
@@ -187,6 +241,27 @@ mod tests {
                 assert!((a - b).abs() < 1e-12);
             }
         }
+        // Large enough for the parallel path (feature `rayon`): must match the
+        // per-row / per-column definition bit for bit.
+        let (w, h) = (300, 200);
+        let x: Vec<f64> = (0..w * h).map(|i| ((i * 31 % 113) as f64).sin()).collect();
+        let mut want = x.clone();
+        for row in want.chunks_exact_mut(w) {
+            crate::forward_frames(row, 64).unwrap();
+        }
+        for c in 0..w {
+            let mut col: Vec<f64> = (0..h).map(|r| want[r * w + c]).collect();
+            crate::forward_frames(&mut col, 64).unwrap();
+            for (r, v) in col.into_iter().enumerate() {
+                want[r * w + c] = v;
+            }
+        }
+        let mut got = x.clone();
+        forward_2d_frames(&mut got, w, h, 64).unwrap();
+        assert_eq!(got, want);
+        inverse_2d_frames(&mut got, w, h, 64).unwrap();
+        assert!(got.iter().zip(&x).all(|(a, b)| (a - b).abs() < 1e-12));
+
         // Power-of-two sizes with frames covering each axis equal forward_2d.
         let x: Vec<f64> = (0..32 * 8).map(|i| (i % 11) as f64).collect();
         let (mut a, mut b) = (x.clone(), x);

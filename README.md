@@ -31,6 +31,50 @@ slantlet::inverse(&mut x)?;   // back to the signal
 
 See the crate docs for the basis definition and coefficient layout.
 
+## How it works
+
+Every slantlet basis function is piecewise linear on the two halves of an
+aligned block. So a block's contribution is fully described by two numbers:
+its projections onto a unit constant (`c`) and a unit ramp (`d`). The
+transform builds these bottom-up:
+
+1. **Pairs.** Each pair of samples becomes `(c, d)`.
+2. **Merges.** Two neighbouring blocks `(c_L, d_L)`, `(c_R, d_R)` combine,
+   through a fixed 4×4 orthogonal map, into the parent's `(c, d)` and the
+   block's two slantlet coefficients `g` and `Jg`. Repeating this up to the
+   whole signal leaves `h` and `f` at the top.
+
+Each sample takes part in a constant number of operations, so the cost is
+O(N). The inverse runs the same merges backwards.
+
+### Cache blocking
+
+The merge at one level only reads blocks that lie inside one aligned
+block of the next level. So every level that fits inside, say, 2048 samples
+can run on that chunk alone. A naive level-by-level loop instead makes a full
+pass over the signal for every level, which is slow once the signal no longer
+fits in cache. The transform therefore works in three phases:
+
+1. **Stream** the samples once into the `(c, d)` pair arrays. This consumes
+   the input, so detail coefficients can then be written anywhere in the
+   output without overwriting unread samples.
+2. **Blocked levels.** For each chunk of 1024 pairs, which fits in L1/L2, run
+   all ten levels that fit inside it. Each level reads from one buffer and
+   writes to another, alternating between the chunk and a small temp buffer.
+   Source and destination never overlap, so the compiler can vectorise the
+   loop. The chunk's final `(c, d)` goes into slot `k`, which lies in an
+   already consumed chunk.
+3. **Coarse levels.** Merge the remaining `N / 2048` slots level by level in
+   place; this costs little.
+
+The inverse mirrors this. It expands the coarse levels first, then each
+chunk in descending order, so no chunk is overwritten before it is read.
+Every block size gives bit-identical output (a test checks all of them),
+so blocking is purely a speed-up. Compared with the level-by-level loop it
+gains 20–50 % (see [BENCH.md](BENCH.md)).
+
+`forward_frames` is fast for the same reason: each frame stays in cache.
+
 ## Applications
 
 Short, piecewise-linear basis functions localize transients well, which makes

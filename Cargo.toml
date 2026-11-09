@@ -16,7 +16,15 @@ exclude = ["fuzz/", ".github/", "release.toml"]
 [lib]
 bench = false # criterion owns `cargo bench` arguments
 
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+# Run large transforms on all cores via rayon. Results are bit-identical.
+rayon = ["dep:rayon"]
+
 [dependencies]
+rayon = { version = "1.10", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

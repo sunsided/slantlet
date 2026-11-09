@@ -19,6 +19,26 @@ slantlet::inverse(&mut x)?;   // back to the signal
 
 See the crate docs for the basis definition and coefficient layout.
 
+## Applications
+
+Short, piecewise-linear basis functions localize transients well, which makes
+slantlet subband energies useful features for vibration-based fault
+diagnosis. Alobaidy et al. ([*Sci. Rep.* 15, 34145, 2025][robot]) use them with
+a small neural network to detect joint faults in an industrial robot arm
+from tip-accelerometer data.
+
+[`examples/fault_features.rs`](examples/fault_features.rs) shows that
+feature-extraction step on synthetic data. It uses the paper's recording
+length (3973 samples), splits each recording into power-of-two frames, and
+reports the relative energy per scale; gear-like impacts raise the
+finest-scale share by more than an order of magnitude:
+
+```sh
+cargo run --example fault_features
+```
+
+[robot]: https://doi.org/10.1038/s41598-025-09272-9
+
 ## Testing
 
 With [go-task](https://taskfile.dev):

@@ -22,13 +22,20 @@ all-features = true
 [features]
 # Run large transforms on all cores via rayon. Results are bit-identical.
 rayon = ["dep:rayon"]
+# Frame-wise transform as a WGSL compute shader on any wgpu device (f32).
+# Needs Rust 1.87 (wgpu's MSRV).
+wgpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dependencies]
+bytemuck = { version = "1.21", optional = true }
+pollster = { version = "0.4", optional = true }
 rayon = { version = "1.10", optional = true }
+wgpu = { version = "30", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1.12"
+bytemuck = "1.21"
 
 [[bench]]
 name = "transforms"

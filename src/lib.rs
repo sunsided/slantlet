@@ -95,6 +95,8 @@
 use std::f64::consts::{FRAC_1_SQRT_2, SQRT_2};
 use std::fmt;
 
+#[cfg(feature = "wgpu")]
+pub mod gpu;
 mod planar;
 mod separable;
 

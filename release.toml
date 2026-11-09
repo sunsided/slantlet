@@ -1,0 +1,11 @@
+# cargo-release: `cargo release <patch|minor|major> --execute`
+# Bumps the version, commits, tags `vX.Y.Z` and pushes; CI publishes the tag.
+allow-branch = ["main"]
+tag-name = "v{{version}}"
+pre-release-commit-message = "Release {{version}}"
+tag-message = "Release {{crate_name}} {{version}}"
+publish = false
+push = true
+push-remote = "origin"
+sign-commit = false
+sign-tag = false

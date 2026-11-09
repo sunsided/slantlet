@@ -1,5 +1,9 @@
 # slantlet
 
+[![CI](https://github.com/sunsided/slantlet/actions/workflows/ci.yml/badge.svg)](https://github.com/sunsided/slantlet/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/slantlet.svg)](https://crates.io/crates/slantlet)
+[![docs.rs](https://docs.rs/slantlet/badge.svg)](https://docs.rs/slantlet)
+
 The Slantlet transform (Selesnick, 1999) in Rust: an orthogonal discrete
 wavelet-like transform. Its basis functions are piecewise linear, have two
 vanishing moments, and have shorter support than the Daubechies-2 wavelet.

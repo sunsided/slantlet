@@ -13,69 +13,112 @@ and treat them as a rough guide anywhere else.
 | CPU | AMD Ryzen 7 PRO 7730U (Zen 3), 8 cores / 16 threads, 0.41–4.55 GHz |
 | Caches | L1d 32 KiB/core, L2 512 KiB/core, L3 16 MiB shared |
 | Memory | 62 GiB |
+| GPU | Integrated AMD Radeon Graphics (Vega, "RENOIR"), Vulkan via Mesa 25.2.8 RADV; shares system memory |
 | OS | Ubuntu 24.04.5 LTS, Linux 7.0.0-38-generic x86_64 |
 | Power | On AC, `performance` governor and energy preference, boost enabled |
-| Load | Desktop session running; load average ≈ 1.3 during the run |
+| Load | Desktop session running; load average 0.2–1.3 at the start of each run, up to ≈ 6 at the end of the parallel run |
 | Toolchain | rustc 1.99.1, `cargo bench` default release profile, no `target-cpu=native` |
 | Date | 2026-11-09 |
 
-Benchmarks run single-threaded; the crate does not parallelise. A laptop's
-clock depends on temperature, so expect a few percent of run-to-run variation.
+A laptop's clock depends on temperature, so expect a few percent of
+run-to-run variation, and more in the parallel column.
 
 ## Results
 
-Time is Criterion's point estimate with its 95 % confidence interval.
-Throughput counts input samples (pixels for 2-D).
+Time is Criterion's point estimate, with its 95 % confidence interval, for
+the default single-threaded build. Throughput counts input samples (pixels
+for 2-D). The last column is the same benchmark built with
+`--features rayon`. Below each parallel threshold the two builds run
+identical code, so differences there are noise.
 
 ### 1-D
 
-| Benchmark | Time | 95 % CI | Throughput |
-|---|---|---|---|
-| `forward`, N = 256 | 429.6 ns | 426.9–433.2 ns | 596 Melem/s |
-| `forward`, N = 4096 | 5.178 µs | 5.157–5.205 µs | 791 Melem/s |
-| `forward`, N = 65536 | 96.31 µs | 92.80–99.78 µs | 680 Melem/s |
-| `forward`, N = 1048576 | 2.034 ms | 2.000–2.074 ms | 516 Melem/s |
-| `inverse`, N = 256 | 454.7 ns | 452.9–457.0 ns | 563 Melem/s |
-| `inverse`, N = 4096 | 6.047 µs | 6.018–6.090 µs | 677 Melem/s |
-| `inverse`, N = 65536 | 107.7 µs | 104.6–111.1 µs | 609 Melem/s |
-| `inverse`, N = 1048576 | 2.060 ms | 2.040–2.082 ms | 509 Melem/s |
-| `forward_frames`, 3973 samples, frame 256 | 5.543 µs | 5.523–5.571 µs | 717 Melem/s |
-| `forward_frames`, 10⁶ samples, frame 1024 | 1.266 ms | 1.260–1.274 ms | 790 Melem/s |
-| `forward_frames`, 10⁶ samples, frame 65536 | 1.258 ms | 1.245–1.271 ms | 795 Melem/s |
+| Benchmark | Time | 95 % CI | Throughput | With `rayon` |
+|---|---|---|---|---|
+| `forward`, N = 256 | 330.3 ns | 329.2–331.4 ns | 775 Melem/s | 757 Melem/s |
+| `forward`, N = 4096 | 3.692 µs | 3.676–3.710 µs | 1.11 Gelem/s | 1.10 Gelem/s |
+| `forward`, N = 65536 | 67.18 µs | 65.81–68.63 µs | 975 Melem/s | 956 Melem/s |
+| `forward`, N = 2¹⁷ | 163.8 µs | 162.9–164.8 µs | 800 Melem/s | 788 Melem/s |
+| `forward`, N = 2¹⁸ | 333.6 µs | 332.3–335.0 µs | 786 Melem/s | 798 Melem/s |
+| `forward`, N = 2¹⁹ | 638.3 µs | 635.5–641.3 µs | 821 Melem/s | 826 Melem/s |
+| `forward`, N = 2²⁰ | 1.625 ms | 1.603–1.652 ms | 645 Melem/s | **888 Melem/s** |
+| `inverse`, N = 256 | 359.8 ns | 359.0–360.7 ns | 711 Melem/s | 714 Melem/s |
+| `inverse`, N = 4096 | 4.436 µs | 4.424–4.447 µs | 923 Melem/s | 916 Melem/s |
+| `inverse`, N = 65536 | 85.82 µs | 82.67–89.21 µs | 764 Melem/s | 846 Melem/s |
+| `inverse`, N = 2¹⁷ | 205.4 µs | 201.8–209.0 µs | 638 Melem/s | 750 Melem/s |
+| `inverse`, N = 2¹⁸ | 375.5 µs | 365.7–385.4 µs | 698 Melem/s | 671 Melem/s |
+| `inverse`, N = 2¹⁹ | 691.6 µs | 679.3–706.6 µs | 758 Melem/s | **1.20 Gelem/s** |
+| `inverse`, N = 2²⁰ | 1.690 ms | 1.681–1.700 ms | 621 Melem/s | **1.18 Gelem/s** |
+| `forward_frames`, 3973 samples, frame 256 | 4.161 µs | 4.153–4.170 µs | 955 Melem/s | 949 Melem/s |
+| `forward_frames`, 10⁶ samples, frame 1024 | 864.6 µs | 859.5–871.7 µs | 1.16 Gelem/s | **4.31 Gelem/s** |
+| `forward_frames`, 10⁶ samples, frame 65536 | 1.010 ms | 0.974–1.050 ms | 990 Melem/s | **2.52 Gelem/s** |
 
 ### 2-D
 
-| Benchmark | Time | 95 % CI | Throughput |
-|---|---|---|---|
-| `forward_2d` (separable), 256×256 | 240.6 µs | 239.8–241.3 µs | 272 Melem/s |
-| `forward_2d_planar`, 256×256 | 76.78 µs | 76.28–77.21 µs | 854 Melem/s |
-| `inverse_2d_planar`, 256×256 | 79.59 µs | 79.35–79.81 µs | 823 Melem/s |
-| `forward_2d` (separable), 1024×1024 | 4.110 ms | 4.080–4.142 ms | 255 Melem/s |
-| `forward_2d_planar`, 1024×1024 | 1.791 ms | 1.777–1.809 ms | 585 Melem/s |
-| `inverse_2d_planar`, 1024×1024 | 2.012 ms | 1.955–2.075 ms | 521 Melem/s |
+| Benchmark | Time | 95 % CI | Throughput | With `rayon` |
+|---|---|---|---|---|
+| `forward_2d` (separable), 256×256 | 200.7 µs | 199.6–201.9 µs | 327 Melem/s | 324 Melem/s |
+| `forward_2d_planar`, 256×256 | 81.83 µs | 81.58–82.12 µs | 801 Melem/s | 867 Melem/s |
+| `inverse_2d_planar`, 256×256 | 80.35 µs | 79.83–81.00 µs | 816 Melem/s | 588 Melem/s |
+| `forward_2d` (separable), 1024×1024 | 3.350 ms | 3.307–3.405 ms | 313 Melem/s | **643 Melem/s** |
+| `forward_2d_planar`, 1024×1024 | 1.727 ms | 1.709–1.749 ms | 607 Melem/s | 601 Melem/s |
+| `inverse_2d_planar`, 1024×1024 | 1.735 ms | 1.723–1.747 ms | 604 Melem/s | 602 Melem/s |
+
+Planar 2-D is not parallelised, so its two columns run the same code.
+
+### GPU (`--features wgpu`, `f32`)
+
+Frame-wise forward transform, 1024-sample frames, on the integrated GPU.
+"Resident" means the data already lives in a GPU buffer: it times
+`encode_forward`, submit, and waiting for completion. "Host" includes the
+upload and the download of the results.
+
+| Benchmark | Time | Throughput |
+|---|---|---|
+| GPU, resident, 2²⁰ samples | 481.2 µs | 2.18 Gelem/s |
+| GPU, host round trip, 2²⁰ samples | 1.624 ms | 646 Melem/s |
+| CPU `forward_frames` (f64, 1 thread), 2²⁰ samples | 903.9 µs | 1.16 Gelem/s |
+| GPU, resident, 2²⁴ samples | 6.163 ms | 2.72 Gelem/s |
+| GPU, host round trip, 2²⁴ samples | 35.79 ms | 469 Melem/s |
+| CPU `forward_frames` (f64, 1 thread), 2²⁴ samples | 23.09 ms | 727 Melem/s |
 
 ## Reading the numbers
 
-- **About 1.3–2 ns per sample** in 1-D, as expected for an O(N) transform with
-  a handful of flops per sample. Timings include the scratch allocation each
-  call makes.
-- **Large single transforms are memory-bound.** At N = 2²⁰ the signal and
-  scratch buffer take 16 MiB together, the whole L3. Splitting the same
-  amount of data into frames (`forward_frames`, 10⁶ samples) keeps each frame
-  in cache and is about 1.5× faster. For long signals, frames are the faster
-  choice whenever the coarsest scale you need fits in a frame.
+- **About 0.9–1.6 ns per sample** in 1-D, single-threaded, for an O(N)
+  transform with a handful of flops per sample. Timings include the scratch
+  allocation each call makes.
+- **Cache blocking** runs all levels inside each 2048-sample chunk while it
+  is in L1/L2 (see the README). It made `forward` 22–42 % faster and
+  `forward_frames` about 1.5× faster than the previous level-by-level loop.
+  Block sizes of 256–4096 pairs were measured; 1024 was the best overall.
+- **AVX2 was tried and dropped.** An AVX2 build of the hot loops (dispatched at
+  runtime, without FMA, so bit-identical) ran within noise of the
+  default SSE2 build. Forward was about 3 % slower, inverse 5–10 % faster. The
+  interleaved pair loads need shuffles that eat the extra lanes.
+- **Parallelism (`rayon`)** pays off where work is independent and large:
+  frame-wise transforms (3.7× at 10⁶ samples), separable 2-D at 1024² (2×),
+  and single transforms from 2¹⁹ samples on (inverse 1.6–1.9×, forward
+  1.4×). A single forward transform is limited by its sequential streaming
+  and coarse levels, and by memory bandwidth. The thresholds in `src/lib.rs`
+  (`par_min`) come from these measurements; below them the sequential code
+  runs.
 - **Separable 2-D is limited by the column pass.** Columns are strided in a
-  row-major image. They are copied out 8 at a time (one 64-byte cache line per
-  row segment). That batch size was the best of 4–128 here, and lifted
-  1024×1024 from 92 to 255 Melem/s compared with copying one column at a time.
-- **Planar 2-D is 2.3–3.1× faster than separable** because each pixel is touched
-  once per level, in blocks, with no column pass.
+  row-major image. They are copied out 8 at a time, which is one 64-byte cache
+  line per row segment and the best of the batch sizes 4–128 measured.
+- **The GPU wins only on resident data.** On data already in GPU memory, the
+  integrated GPU runs 2.2–2.7 Gelem/s, 1.9–3.7× a single CPU thread. Copying
+  data from the host and back costs more than the transform: the round trip
+  is slower than the CPU. The `rayon` CPU build (4.3 Gelem/s on frames)
+  beats this integrated GPU outright. A discrete GPU, or a pipeline that
+  keeps data on the GPU, changes that balance.
 
 ## Reproducing
 
 ```sh
-task bench                                  # or: cargo bench --bench transforms
-cargo bench --bench transforms -- 2d/       # filter by benchmark name
+task bench                                            # or: cargo bench --bench transforms
+cargo bench --bench transforms --features rayon       # parallel column
+cargo bench --bench transforms --features wgpu -- gpu/   # GPU (needs an adapter)
+cargo bench --bench transforms -- 2d/                 # filter by name
 ```
 
 When updating this file, rerun the full suite on otherwise idle hardware and

@@ -18,9 +18,15 @@ vanishing moments, and have shorter support than the Daubechies-2 wavelet.
 - The basis is orthonormal, so energy is preserved and `inverse` is the transpose of `forward`.
 - Linear signals (`a + b·n`) produce zero detail coefficients.
 - Coefficients match the paper's slantlet matrix (Sec. II-F, Fig. 5) exactly.
-- O(N) and fast: roughly 500–800 million samples/s on a laptop CPU; see
-  [BENCH.md](BENCH.md) for numbers and the hardware they were measured on.
-- No dependencies.
+- O(N) and cache-blocked: 0.6–1.1 billion samples/s on one laptop CPU core;
+  see [BENCH.md](BENCH.md) for numbers and the hardware they were measured on.
+- Optional features:
+  - `rayon` parallelises large transforms (frames, separable 2-D, single
+    transforms from 2¹⁹ samples), with bit-identical results.
+  - `wgpu` runs frame-wise transforms as a WGSL compute shader (`f32`, frames
+    up to 4096 samples), for host data or for buffers already on the GPU
+    (`slantlet::gpu`). It needs Rust 1.87.
+- No dependencies by default.
 
 ```rust
 let mut x = [1.0, 4.0, -2.0, 0.5, 3.0, 3.0, 0.0, -1.0];

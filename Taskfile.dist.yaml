@@ -1,0 +1,89 @@
+version: '3'
+
+includes:
+  fuzz:
+    taskfile: fuzz/Taskfile.dist.yaml
+    dir: fuzz
+
+tasks:
+  default:
+    cmds:
+      - task --list --sort=none
+    silent: true
+
+  build:
+    desc: Build the crate, then check that fuzz targets still compile
+    preconditions: &cargo
+      - sh: command -v cargo
+        msg: "cargo not found — install Rust from https://rustup.rs/"
+    cmds:
+      - cargo build --all-targets
+      - task: fuzz:build
+
+  test:
+    desc: Run unit, property, reference and doc tests (extra args after --)
+    preconditions: *cargo
+    cmds:
+      - cargo test {{.CLI_ARGS}}
+
+  fmt:
+    desc: Format all Rust sources (crate and fuzz targets)
+    aliases: [format]
+    preconditions: *cargo
+    cmds:
+      - cargo fmt --all
+      - cargo fmt --manifest-path fuzz/Cargo.toml
+
+  fmt:check:
+    desc: Check formatting without modifying files
+    preconditions: *cargo
+    cmds:
+      - cargo fmt --all -- --check
+      - cargo fmt --manifest-path fuzz/Cargo.toml -- --check
+
+  lint:
+    desc: Run clippy (warnings as errors)
+    preconditions: *cargo
+    cmds:
+      - cargo clippy --all-targets -- -D warnings
+
+  lint:fix:
+    desc: Apply clippy fixes, then format
+    aliases: [fix]
+    preconditions: *cargo
+    cmds:
+      - cargo clippy --all-targets --fix --allow-dirty --allow-staged
+      - task: fmt
+
+  docs:
+    desc: Build API docs
+    preconditions: *cargo
+    cmds:
+      - cargo doc --no-deps
+
+  docs:open:
+    desc: Build API docs and open them
+    preconditions: *cargo
+    cmds:
+      - cargo doc --no-deps --open
+
+  check:
+    desc: All static checks (format, clippy, docs)
+    cmds:
+      - task: fmt:check
+      - task: lint
+      - task: docs
+
+  ci:
+    desc: Full CI sequence (checks, tests, fuzz smoke run)
+    cmds:
+      - task: check
+      - task: test
+      - task: fuzz:smoke
+
+  clean:
+    desc: Remove build output
+    preconditions: *cargo
+    cmds:
+      - cargo clean
+      - task: fuzz:clean

@@ -11,7 +11,15 @@ keywords = ["slantlet", "wavelet", "transform", "dsp", "signal"]
 categories = ["mathematics", "science"]
 exclude = ["fuzz/"]
 
+[lib]
+bench = false # criterion owns `cargo bench` arguments
+
 [dependencies]
 
 [dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 proptest = "1.12"
+
+[[bench]]
+name = "transforms"
+harness = false

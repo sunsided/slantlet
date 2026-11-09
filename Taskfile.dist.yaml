@@ -55,6 +55,12 @@ tasks:
       - cargo clippy --all-targets --fix --allow-dirty --allow-staged
       - task: fmt
 
+  bench:
+    desc: Run the Criterion benchmarks (filter after --; results in BENCH.md)
+    preconditions: *cargo
+    cmds:
+      - cargo bench --bench transforms -- {{.CLI_ARGS}}
+
   docs:
     desc: Build API docs
     preconditions: *cargo

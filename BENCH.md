@@ -55,16 +55,22 @@ identical code, so differences there are noise.
 
 ### 2-D
 
+Measured in a separate run on the same day, after planar 2-D was parallelised.
+
 | Benchmark | Time | 95 % CI | Throughput | With `rayon` |
 |---|---|---|---|---|
-| `forward_2d` (separable), 256×256 | 200.7 µs | 199.6–201.9 µs | 327 Melem/s | 324 Melem/s |
-| `forward_2d_planar`, 256×256 | 81.83 µs | 81.58–82.12 µs | 801 Melem/s | 867 Melem/s |
-| `inverse_2d_planar`, 256×256 | 80.35 µs | 79.83–81.00 µs | 816 Melem/s | 588 Melem/s |
-| `forward_2d` (separable), 1024×1024 | 3.350 ms | 3.307–3.405 ms | 313 Melem/s | **643 Melem/s** |
-| `forward_2d_planar`, 1024×1024 | 1.727 ms | 1.709–1.749 ms | 607 Melem/s | 601 Melem/s |
-| `inverse_2d_planar`, 1024×1024 | 1.735 ms | 1.723–1.747 ms | 604 Melem/s | 602 Melem/s |
+| `forward_2d` (separable), 256×256 | 196.7 µs | 195.5–198.4 µs | 333 Melem/s | 343 Melem/s |
+| `forward_2d_planar`, 256×256 | 79.52 µs | 79.09–80.01 µs | 824 Melem/s | 589 Melem/s |
+| `inverse_2d_planar`, 256×256 | 111.2 µs | 110.7–111.7 µs | 590 Melem/s | 577 Melem/s |
+| `forward_2d` (separable), 512×512 | 786.2 µs | 780.8–793.8 µs | 333 Melem/s | **533 Melem/s** |
+| `forward_2d_planar`, 512×512 | 384.1 µs | 381.5–386.9 µs | 683 Melem/s | **767 Melem/s** |
+| `inverse_2d_planar`, 512×512 | 438.7 µs | 437.1–440.5 µs | 598 Melem/s | **852 Melem/s** |
+| `forward_2d` (separable), 1024×1024 | 3.425 ms | 3.352–3.511 ms | 306 Melem/s | **564 Melem/s** |
+| `forward_2d_planar`, 1024×1024 | 1.856 ms | 1.833–1.882 ms | 565 Melem/s | **954 Melem/s** |
+| `inverse_2d_planar`, 1024×1024 | 1.896 ms | 1.881–1.912 ms | 553 Melem/s | **1.02 Gelem/s** |
 
-Planar 2-D is not parallelised, so its two columns run the same code.
+256×256 is below both 2-D parallel thresholds, so its two columns run the
+same code.
 
 ### GPU (`--features wgpu`, `f32`)
 
@@ -102,6 +108,13 @@ upload and the download of the results.
   and coarse levels, and by memory bandwidth. The thresholds in `src/lib.rs`
   (`par_min`) come from these measurements; below them the sequential code
   runs.
+- **Planar 2-D runs in bands when parallel.** Each band of 32 image rows runs
+  every level whose blocks fit inside it on its own thread, then the coarse
+  levels run on the whole image. This gives 1.3–1.8× from 512×512 up; band
+  heights 16–128 were measured, 32 was best. Single-threaded, the band
+  layout was slower, so the sequential path keeps one band over the whole
+  image. The refactor still costs it 0–5 % (inverse up to ≈ 6 %, measured
+  A/B against the previous code).
 - **Separable 2-D is limited by the column pass.** Columns are strided in a
   row-major image. They are copied out 8 at a time, which is one 64-byte cache
   line per row segment and the best of the batch sizes 4–128 measured.

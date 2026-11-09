@@ -47,7 +47,7 @@ fn frames(c: &mut Criterion) {
 
 fn two_d(c: &mut Criterion) {
     let mut g = c.benchmark_group("2d");
-    for side in [256usize, 1024] {
+    for side in [256usize, 512, 1024] {
         let mut x = signal(side * side);
         g.throughput(Throughput::Elements((side * side) as u64));
         g.bench_function(

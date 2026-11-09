@@ -45,6 +45,14 @@
 //! `g` coefficient sits at `N/m + 2b`, its `Jg` coefficient at `N/m + 2b + 1`.
 //! `N = 2` reduces to the Haar transform, `N = 1` to the identity.
 //!
+//! # Arbitrary lengths
+//!
+//! [`forward_frames`] and [`inverse_frames`] handle any length, including
+//! unbounded streams. They transform consecutive power-of-two frames, then
+//! split any remainder into power-of-two pieces. The result stays orthogonal
+//! and lossless, and frame detail coefficients equal the filterbank's on the
+//! whole signal.
+//!
 //! # Algorithm
 //!
 //! Piecewise-linear basis functions only need each half-block's projection on
@@ -106,15 +114,20 @@ fn rotation(m: usize) -> (f64, f64) {
 ///
 /// `x.len()` must be a power of two (including 1). On error `x` is unchanged.
 pub fn forward(x: &mut [f64]) -> Result<(), Error> {
+    check_len(x.len())?;
+    forward_with(x, &mut vec![0.0; x.len()]);
+    Ok(())
+}
+
+/// [`forward`] for a power-of-two `x`, using `scratch[..x.len()]`.
+fn forward_with(x: &mut [f64], scratch: &mut [f64]) {
     let n = x.len();
-    check_len(n)?;
     if n < 2 {
-        return Ok(());
+        return;
     }
 
     // c[k], d[k]: projection of block k onto its unit constant and unit ramp.
-    let mut scratch = vec![0.0; n];
-    let (c, d) = scratch.split_at_mut(n / 2);
+    let (c, d) = scratch[..n].split_at_mut(n / 2);
     for (k, p) in x.chunks_exact(2).enumerate() {
         c[k] = (p[0] + p[1]) * FRAC_1_SQRT_2;
         d[k] = (p[1] - p[0]) * FRAC_1_SQRT_2;
@@ -142,21 +155,25 @@ pub fn forward(x: &mut [f64]) -> Result<(), Error> {
 
     x[0] = c[0];
     x[1] = -d[0]; // reference f is the descending ramp
-    Ok(())
 }
 
 /// Inverse Slantlet transform, in place.
 ///
 /// `y.len()` must be a power of two (including 1). On error `y` is unchanged.
 pub fn inverse(y: &mut [f64]) -> Result<(), Error> {
+    check_len(y.len())?;
+    inverse_with(y, &mut vec![0.0; y.len()]);
+    Ok(())
+}
+
+/// [`inverse`] for a power-of-two `y`, using `scratch[..y.len()]`.
+fn inverse_with(y: &mut [f64], scratch: &mut [f64]) {
     let n = y.len();
-    check_len(n)?;
     if n < 2 {
-        return Ok(());
+        return;
     }
 
-    let mut scratch = vec![0.0; n];
-    let (c, d) = scratch.split_at_mut(n / 2);
+    let (c, d) = scratch[..n].split_at_mut(n / 2);
     c[0] = y[0];
     d[0] = -y[1];
 
@@ -187,6 +204,63 @@ pub fn inverse(y: &mut [f64]) -> Result<(), Error> {
     for (k, p) in y.chunks_exact_mut(2).enumerate() {
         p[0] = (c[k] - d[k]) * FRAC_1_SQRT_2;
         p[1] = (c[k] + d[k]) * FRAC_1_SQRT_2;
+    }
+}
+
+/// Forward transform of an arbitrary-length signal, frame by frame, in place.
+///
+/// `x` is split into consecutive frames of `frame_len` samples (a power of
+/// two), and each frame is replaced by its [`forward`] transform. A trailing
+/// remainder shorter than `frame_len` is split by its binary expansion into
+/// decreasing power-of-two pieces (e.g. 3973 samples with 256-sample frames:
+/// 15 frames, then pieces of 128, 4 and 1), each transformed on its own.
+///
+/// The result is orthogonal and exactly inverted by [`inverse_frames`] with
+/// the same `frame_len`; no padding is involved. Because slantlet detail
+/// functions live on aligned blocks, a frame's detail coefficients equal
+/// Selesnick's filterbank outputs on the whole signal for scales below
+/// `log2(frame_len)`; only each frame's `h`/`f` pair (constant and ramp over
+/// the frame) is local. Memory use is one scratch buffer of `frame_len`,
+/// so arbitrarily long signals can be processed, also chunk-wise as a stream
+/// as long as each chunk holds whole frames.
+///
+/// Returns an error, leaving `x` unchanged, if `frame_len` is not a power of
+/// two.
+///
+/// ```
+/// let mut x: Vec<f64> = (0..1000).map(|n| (n as f64 * 0.01).sin()).collect();
+/// let original = x.clone();
+/// slantlet::forward_frames(&mut x, 256)?;
+/// slantlet::inverse_frames(&mut x, 256)?;
+/// assert!(x.iter().zip(&original).all(|(a, b)| (a - b).abs() < 1e-12));
+/// # Ok::<(), slantlet::Error>(())
+/// ```
+pub fn forward_frames(x: &mut [f64], frame_len: usize) -> Result<(), Error> {
+    for_each_piece(x, frame_len, forward_with)
+}
+
+/// Inverse of [`forward_frames`] with the same `frame_len`, in place.
+///
+/// Returns an error, leaving `y` unchanged, if `frame_len` is not a power of
+/// two.
+pub fn inverse_frames(y: &mut [f64], frame_len: usize) -> Result<(), Error> {
+    for_each_piece(y, frame_len, inverse_with)
+}
+
+/// Applies `f` to full frames, then to the remainder's binary-expansion pieces.
+fn for_each_piece(
+    x: &mut [f64],
+    frame_len: usize,
+    f: fn(&mut [f64], &mut [f64]),
+) -> Result<(), Error> {
+    check_len(frame_len)?;
+    let mut scratch = vec![0.0; frame_len.min(x.len())];
+    let mut rest = x;
+    while !rest.is_empty() {
+        let n = frame_len.min(1 << rest.len().ilog2());
+        let (piece, tail) = rest.split_at_mut(n);
+        f(piece, &mut scratch);
+        rest = tail;
     }
     Ok(())
 }
@@ -342,6 +416,85 @@ mod tests {
         let mut two = [1.0, 3.0];
         forward(&mut two).unwrap();
         assert_close(&two, &[4.0 * FRAC_1_SQRT_2, -2.0 * FRAC_1_SQRT_2], EPS);
+    }
+
+    /// Frames and binary-expansion tail pieces are each a plain `forward`.
+    #[test]
+    fn frames_equal_per_piece_forward() {
+        let x: Vec<f64> = (0..3973).map(|t| ((t * 31 % 97) as f64).cos()).collect();
+        let mut y = x.clone();
+        forward_frames(&mut y, 256).unwrap();
+        let mut pieces: Vec<usize> = vec![256; 15];
+        pieces.extend([128, 4, 1]);
+        let mut start = 0;
+        for len in pieces {
+            let mut want = x[start..start + len].to_vec();
+            forward(&mut want).unwrap();
+            assert_eq!(&y[start..start + len], &want[..], "piece at {start}");
+            start += len;
+        }
+        assert_eq!(start, x.len());
+        inverse_frames(&mut y, 256).unwrap();
+        assert_close(&y, &x, 1e-12);
+    }
+
+    #[test]
+    fn frames_roundtrip_any_length() {
+        for frame in [1, 2, 4, 64] {
+            for n in 0..=200 {
+                let x: Vec<f64> = (0..n).map(|t| (t as f64 * 0.37).sin() * 5.0).collect();
+                let mut y = x.clone();
+                forward_frames(&mut y, frame).unwrap();
+                assert!(
+                    (dot(&x, &x) - dot(&y, &y)).abs() < 1e-10,
+                    "n={n} frame={frame}"
+                );
+                inverse_frames(&mut y, frame).unwrap();
+                assert_close(&y, &x, 1e-12);
+            }
+        }
+    }
+
+    /// Detail coefficients of an aligned frame equal those of the full-length
+    /// transform's same blocks (detail functions are block-local).
+    #[test]
+    fn frame_details_match_full_transform() {
+        let n = 1024;
+        let frame = 128;
+        let x: Vec<f64> = (0..n).map(|t| ((t * 7 % 23) as f64).sqrt()).collect();
+        let mut full = x.clone();
+        forward(&mut full).unwrap();
+        let mut framed = x.clone();
+        forward_frames(&mut framed, frame).unwrap();
+        let frames = n / frame;
+        for k in 0..frames {
+            let mut m = 2;
+            while m < frame {
+                for b in 0..frame / (2 * m) {
+                    let local = framed[k * frame + frame / m + 2 * b];
+                    let global = full[n / m + 2 * (k * frame / (2 * m) + b)];
+                    assert!((local - global).abs() < 1e-12, "frame {k} m={m} b={b}");
+                }
+                m *= 2;
+            }
+        }
+    }
+
+    #[test]
+    fn frames_reject_bad_frame_len() {
+        let mut x = vec![1.0, 2.0, 3.0];
+        for frame in [0, 3, 12] {
+            assert_eq!(
+                forward_frames(&mut x, frame),
+                Err(Error::LengthNotPowerOfTwo(frame))
+            );
+            assert_eq!(
+                inverse_frames(&mut x, frame),
+                Err(Error::LengthNotPowerOfTwo(frame))
+            );
+        }
+        assert_eq!(x, [1.0, 2.0, 3.0]);
+        forward_frames(&mut [], 8).unwrap();
     }
 
     #[test]

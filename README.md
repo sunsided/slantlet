@@ -5,6 +5,8 @@ wavelet-like transform. Its basis functions are piecewise linear, have two
 vanishing moments, and have shorter support than the Daubechies-2 wavelet.
 
 - Forward and inverse transforms work in place in `O(N)`, for any power-of-two length.
+- `forward_frames` / `inverse_frames` handle any length (or a stream) frame by
+  frame, losslessly and without padding.
 - The basis is orthonormal, so energy is preserved and `inverse` is the transpose of `forward`.
 - Linear signals (`a + b·n`) produce zero detail coefficients.
 - Coefficients match the paper's slantlet matrix (Sec. II-F, Fig. 5) exactly.

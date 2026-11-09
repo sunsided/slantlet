@@ -83,3 +83,41 @@ proptest! {
         prop_assert!(y.iter().zip(&x).all(|(a, b)| a.to_bits() == b.to_bits()));
     }
 }
+
+proptest! {
+    #[test]
+    fn frames_roundtrip_and_energy(
+        x in prop::collection::vec(-1e6f64..1e6, 0..2000),
+        k in 0u32..=11,
+    ) {
+        let frame = 1usize << k;
+        let mut y = x.clone();
+        slantlet::forward_frames(&mut y, frame).unwrap();
+        let t = tol(&x);
+        prop_assert!((norm(&x) - norm(&y)).abs() <= t);
+        slantlet::inverse_frames(&mut y, frame).unwrap();
+        for (a, b) in y.iter().zip(&x) {
+            prop_assert!((a - b).abs() <= t, "{a} vs {b}");
+        }
+    }
+
+    /// A signal made of whole frames transforms like each frame on its own,
+    /// so it can be streamed chunk by chunk.
+    #[test]
+    fn frames_stream_chunkwise(
+        x in prop::collection::vec(-1e3f64..1e3, 0..1500),
+        k in 0u32..=8,
+        chunk_frames in 1usize..5,
+    ) {
+        let frame = 1usize << k;
+        let mut whole = x.clone();
+        slantlet::forward_frames(&mut whole, frame).unwrap();
+        let mut streamed = x.clone();
+        for chunk in streamed.chunks_mut(frame * chunk_frames) {
+            slantlet::forward_frames(chunk, frame).unwrap();
+        }
+        // Only the final partial chunk may split differently; compare the rest.
+        let full = x.len() / (frame * chunk_frames) * frame * chunk_frames;
+        prop_assert_eq!(&whole[..full], &streamed[..full]);
+    }
+}

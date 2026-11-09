@@ -1,0 +1,17 @@
+[package]
+name = "slantlet"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "EUPL-1.2"
+description = "The Slantlet transform (Selesnick, 1999): an orthogonal, O(N) discrete wavelet-like transform with piecewise-linear basis functions and two vanishing moments."
+authors = ["Markus Mayer"]
+readme = "README.md"
+keywords = ["slantlet", "wavelet", "transform", "dsp", "signal"]
+categories = ["mathematics", "science"]
+exclude = ["fuzz/"]
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1.12"

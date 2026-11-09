@@ -73,64 +73,9 @@ use crate::{Error, check_dims, check_len, rotation};
 pub fn forward_2d_planar(x: &mut [f64], side: usize) -> Result<(), Error> {
     check_dims(x.len(), side, side)?;
     check_len(side)?;
-    if side < 2 {
-        return Ok(());
-    }
-    let n = side;
-    let q = n * n / 4;
-    let mut scratch = vec![0.0; 4 * q];
-    let (c, rest) = scratch.split_at_mut(q);
-    let (xr, rest) = rest.split_at_mut(q);
-    let (yr, dd) = rest.split_at_mut(q);
-
-    // 2×2 pixel blocks: plane (c, x-ramp, y-ramp) and checkerboard.
-    let k = n / 2;
-    for by in 0..k {
-        for bx in 0..k {
-            let i = 2 * by * n + 2 * bx;
-            let h = haar([x[i], x[i + 1], x[i + n], x[i + n + 1]]);
-            let b = by * k + bx;
-            (c[b], xr[b], yr[b], dd[b]) = (h[0], h[1], h[2], h[3]);
-        }
-    }
-    x[n * n - q..].copy_from_slice(dd);
-
-    let mut m = 2; // child block side
-    while m < n {
-        let k = n / m; // children per row
-        let t = k / 2; // parents per row
-        let (alpha, beta) = rotation(m);
-        // Ascending parents: parent p is stored at or before its first child.
-        for p in 0..t * t {
-            let ch = children(p, t);
-            let hc = haar(ch.map(|i| c[i]));
-            let hx = haar(ch.map(|i| xr[i]));
-            let hy = haar(ch.map(|i| yr[i]));
-            let ax = beta * hc[1] - alpha * hx[0];
-            let ay = beta * hc[2] - alpha * hy[0];
-            let (sx, sy) = (hx[1], hy[2]);
-            let o = 3 * t * t + 9 * p;
-            x[o..o + 9].copy_from_slice(&[
-                -(sx + ax) * FRAC_1_SQRT_2,
-                -(sx - ax) * FRAC_1_SQRT_2,
-                -(sy + ay) * FRAC_1_SQRT_2,
-                -(sy - ay) * FRAC_1_SQRT_2,
-                hc[3],
-                hx[2],
-                hx[3],
-                hy[1],
-                hy[3],
-            ]);
-            c[p] = hc[0];
-            xr[p] = alpha * hc[1] + beta * hx[0];
-            yr[p] = alpha * hc[2] + beta * hy[0];
-        }
-        m *= 2;
-    }
-
-    x[0] = c[0];
-    x[1] = -xr[0];
-    x[2] = -yr[0];
+    let par = par(x.len());
+    // Banding only pays off with threads; one band is the plain level loop.
+    forward_banded(x, side, if par { BAND } else { side }, par);
     Ok(())
 }
 
@@ -138,11 +83,153 @@ pub fn forward_2d_planar(x: &mut [f64], side: usize) -> Result<(), Error> {
 pub fn inverse_2d_planar(y: &mut [f64], side: usize) -> Result<(), Error> {
     check_dims(y.len(), side, side)?;
     check_len(side)?;
-    if side < 2 {
-        return Ok(());
+    let par = par(y.len());
+    // Banding only pays off with threads; one band is the plain level loop.
+    inverse_banded(y, side, if par { BAND } else { side }, par);
+    Ok(())
+}
+
+/// Image rows per band in the parallel path (feature `rayon`). Every level
+/// whose blocks fit inside a band runs band by band; only coarser levels see
+/// the whole image. Single-threaded, one band spanning the image measured
+/// faster.
+const BAND: usize = 32;
+
+/// Whether an image of `len` pixels is transformed in parallel.
+fn par(len: usize) -> bool {
+    #[cfg(feature = "rayon")]
+    return crate::parallel(len, crate::par_min::PLANAR);
+    #[cfg(not(feature = "rayon"))]
+    {
+        let _ = len;
+        false
     }
-    let n = side;
+}
+
+/// Runs `f` on every item, in parallel when `par` is set (feature `rayon`).
+fn for_each_band<T: Send>(items: Vec<T>, par: bool, f: impl Fn(T) + Send + Sync) {
+    #[cfg(feature = "rayon")]
+    if par {
+        use rayon::prelude::*;
+        items.into_par_iter().for_each(f);
+        return;
+    }
+    let _ = par;
+    items.into_iter().for_each(f);
+}
+
+/// Forward transform of an `n × n` image with bands of `band` rows.
+///
+/// 1. Per band: pixels → plane and checkerboard of every 2×2 block. This
+///    reads all pixels before any coefficient is written.
+/// 2. Per band: every level whose blocks fit in the band. A band's blocks
+///    and its outputs at each level are contiguous in row-major order, so
+///    bands work on disjoint slices; each compacts in place in its own
+///    scratch region.
+/// 3. Gather the band results into one grid and run the coarse levels.
+fn forward_banded(x: &mut [f64], n: usize, band: usize, par: bool) {
+    if n < 2 {
+        return;
+    }
     let q = n * n / 4;
+    let band = band.min(n);
+    let bq = band * n / 4; // scratch entries per band
+    let mut scratch = vec![0.0; 4 * q];
+    let (c, rest) = scratch.split_at_mut(q);
+    let (xr, rest) = rest.split_at_mut(q);
+    let (yr, dd) = rest.split_at_mut(q);
+
+    let pixels = &*x;
+    let items: Vec<_> = c
+        .chunks_mut(bq)
+        .zip(xr.chunks_mut(bq))
+        .zip(yr.chunks_mut(bq))
+        .zip(dd.chunks_mut(bq))
+        .enumerate()
+        .collect();
+    for_each_band(items, par, |(b, (((c, xr), yr), dd))| {
+        let k = n / 2;
+        for r in 0..band / 2 {
+            for bx in 0..k {
+                let i = (b * band + 2 * r) * n + 2 * bx;
+                let h = haar([pixels[i], pixels[i + 1], pixels[i + n], pixels[i + n + 1]]);
+                let j = r * k + bx;
+                (c[j], xr[j], yr[j], dd[j]) = (h[0], h[1], h[2], h[3]);
+            }
+        }
+    });
+    x[n * n - q..].copy_from_slice(dd);
+
+    // Per-band output slices of every band-local level, finest first. The
+    // regions [3t², 12t²) of levels with block side ≤ band follow each other.
+    let bands = n / band;
+    let mut outs: Vec<Vec<&mut [f64]>> = (0..bands).map(|_| Vec::new()).collect();
+    let mut rest = &mut x[3 * bands * bands..];
+    let mut m = band / 2; // child block side, coarsest band-local level first
+    while m >= 2 {
+        let t = n / (2 * m);
+        let (region, tail) = rest.split_at_mut(9 * t * t);
+        rest = tail;
+        for (o, chunk) in outs
+            .iter_mut()
+            .zip(region.chunks_mut(9 * t * band / (2 * m)))
+        {
+            o.push(chunk);
+        }
+        m /= 2;
+    }
+    let items: Vec<_> = c
+        .chunks_mut(bq)
+        .zip(xr.chunks_mut(bq))
+        .zip(yr.chunks_mut(bq))
+        .zip(outs)
+        .collect();
+    for_each_band(items, par, |(((c, xr), yr), outs)| {
+        let mut m = 2;
+        for out in outs.into_iter().rev() {
+            let k = n / m;
+            merge_grid(c, xr, yr, k, band / (2 * m) * (k / 2), out, rotation(m));
+            m *= 2;
+        }
+    });
+
+    // Gather: band b's top row of blocks becomes row b of the global grid.
+    // Destinations precede every unread source, so ascending order is safe.
+    for b in 1..bands {
+        for i in 0..bands {
+            let (from, to) = (b * bq + i, b * bands + i);
+            (c[to], xr[to], yr[to]) = (c[from], xr[from], yr[from]);
+        }
+    }
+    let mut m = band; // child block side
+    while m < n {
+        let t = n / (2 * m);
+        merge_grid(
+            c,
+            xr,
+            yr,
+            2 * t,
+            t * t,
+            &mut x[3 * t * t..12 * t * t],
+            rotation(m),
+        );
+        m *= 2;
+    }
+
+    x[0] = c[0];
+    x[1] = -xr[0];
+    x[2] = -yr[0];
+}
+
+/// Inverse of [`forward_banded`] with the same band height.
+fn inverse_banded(y: &mut [f64], n: usize, band: usize, par: bool) {
+    if n < 2 {
+        return;
+    }
+    let q = n * n / 4;
+    let band = band.min(n);
+    let bq = band * n / 4;
+    let bands = n / band;
     let mut scratch = vec![0.0; 4 * q];
     let (c, rest) = scratch.split_at_mut(q);
     let (xr, rest) = rest.split_at_mut(q);
@@ -153,41 +240,143 @@ pub fn inverse_2d_planar(y: &mut [f64], side: usize) -> Result<(), Error> {
     yr[0] = -y[2];
 
     let mut m = n / 2;
-    while m >= 2 {
-        let k = n / m;
-        let t = k / 2;
-        let (alpha, beta) = rotation(m);
-        // Descending parents: children are stored at or after their parent.
-        for p in (0..t * t).rev() {
-            let o = 3 * t * t + 9 * p;
-            let d = &y[o..o + 9];
-            let sx = -(d[0] + d[1]) * FRAC_1_SQRT_2;
-            let ax = -(d[0] - d[1]) * FRAC_1_SQRT_2;
-            let sy = -(d[2] + d[3]) * FRAC_1_SQRT_2;
-            let ay = -(d[2] - d[3]) * FRAC_1_SQRT_2;
-            let (pc, px, py) = (c[p], xr[p], yr[p]);
-            // [[α, β], [β, -α]] is its own inverse.
-            let hc = [pc, alpha * px + beta * ax, alpha * py + beta * ay, d[4]];
-            let hx = [beta * px - alpha * ax, sx, d[5], d[6]];
-            let hy = [beta * py - alpha * ay, d[7], sy, d[8]];
-            let (vc, vx, vy) = (unhaar(hc), unhaar(hx), unhaar(hy));
-            for (j, &i) in children(p, t).iter().enumerate() {
-                (c[i], xr[i], yr[i]) = (vc[j], vx[j], vy[j]);
-            }
-        }
+    while m >= band {
+        let t = n / (2 * m);
+        split_grid(
+            c,
+            xr,
+            yr,
+            2 * t,
+            t * t,
+            &y[3 * t * t..12 * t * t],
+            rotation(m),
+        );
         m /= 2;
     }
 
-    let k = n / 2;
-    for by in 0..k {
-        for bx in 0..k {
-            let b = by * k + bx;
-            let v = unhaar([c[b], xr[b], yr[b], dd[b]]);
-            let i = 2 * by * n + 2 * bx;
-            (y[i], y[i + 1], y[i + n], y[i + n + 1]) = (v[0], v[1], v[2], v[3]);
+    // Scatter row b of the global grid to band b; descending order never
+    // overwrites a source that is still to be read.
+    for b in (1..bands).rev() {
+        for i in (0..bands).rev() {
+            let (from, to) = (b * bands + i, b * bq + i);
+            (c[to], xr[to], yr[to]) = (c[from], xr[from], yr[from]);
         }
     }
-    Ok(())
+
+    // Band-local levels only read coefficients; pixels are written afterwards.
+    let coeffs = &*y;
+    let items: Vec<_> = c
+        .chunks_mut(bq)
+        .zip(xr.chunks_mut(bq))
+        .zip(yr.chunks_mut(bq))
+        .enumerate()
+        .collect();
+    for_each_band(items, par, |(b, ((c, xr), yr))| {
+        let mut m = band / 2;
+        while m >= 2 {
+            let t = n / (2 * m);
+            let parents = band / (2 * m) * t;
+            let o = 3 * t * t + 9 * b * parents;
+            split_grid(
+                c,
+                xr,
+                yr,
+                2 * t,
+                parents,
+                &coeffs[o..o + 9 * parents],
+                rotation(m),
+            );
+            m /= 2;
+        }
+    });
+
+    let items: Vec<_> = y
+        .chunks_mut(band * n)
+        .zip(c.chunks(bq))
+        .zip(xr.chunks(bq))
+        .zip(yr.chunks(bq))
+        .zip(dd.chunks(bq))
+        .collect();
+    for_each_band(items, par, |((((rows, c), xr), yr), dd)| {
+        let k = n / 2;
+        for r in 0..band / 2 {
+            for bx in 0..k {
+                let j = r * k + bx;
+                let v = unhaar([c[j], xr[j], yr[j], dd[j]]);
+                let i = 2 * r * n + 2 * bx;
+                (rows[i], rows[i + 1], rows[i + n], rows[i + n + 1]) = (v[0], v[1], v[2], v[3]);
+            }
+        }
+    });
+}
+
+/// One forward level on a row-major grid of child blocks with `k` per row,
+/// stored in place in `(c, xr, yr)`: the first `parents` parents (in
+/// row-major order, `k / 2` per row) merge their four children and write
+/// 9 details each to `out`.
+fn merge_grid(
+    c: &mut [f64],
+    xr: &mut [f64],
+    yr: &mut [f64],
+    k: usize,
+    parents: usize,
+    out: &mut [f64],
+    (alpha, beta): (f64, f64),
+) {
+    // Ascending parents: parent p is stored at or before its first child.
+    for p in 0..parents {
+        let ch = children(p, k / 2);
+        let hc = haar(ch.map(|i| c[i]));
+        let hx = haar(ch.map(|i| xr[i]));
+        let hy = haar(ch.map(|i| yr[i]));
+        let ax = beta * hc[1] - alpha * hx[0];
+        let ay = beta * hc[2] - alpha * hy[0];
+        let (sx, sy) = (hx[1], hy[2]);
+        out[9 * p..9 * p + 9].copy_from_slice(&[
+            -(sx + ax) * FRAC_1_SQRT_2,
+            -(sx - ax) * FRAC_1_SQRT_2,
+            -(sy + ay) * FRAC_1_SQRT_2,
+            -(sy - ay) * FRAC_1_SQRT_2,
+            hc[3],
+            hx[2],
+            hx[3],
+            hy[1],
+            hy[3],
+        ]);
+        c[p] = hc[0];
+        xr[p] = alpha * hc[1] + beta * hx[0];
+        yr[p] = alpha * hc[2] + beta * hy[0];
+    }
+}
+
+/// Inverse of [`merge_grid`]: expands the first `parents` parents into their
+/// children, reading 9 details each from `det`.
+fn split_grid(
+    c: &mut [f64],
+    xr: &mut [f64],
+    yr: &mut [f64],
+    k: usize,
+    parents: usize,
+    det: &[f64],
+    (alpha, beta): (f64, f64),
+) {
+    // Descending parents: children are stored at or after their parent.
+    for p in (0..parents).rev() {
+        let d = &det[9 * p..9 * p + 9];
+        let sx = -(d[0] + d[1]) * FRAC_1_SQRT_2;
+        let ax = -(d[0] - d[1]) * FRAC_1_SQRT_2;
+        let sy = -(d[2] + d[3]) * FRAC_1_SQRT_2;
+        let ay = -(d[2] - d[3]) * FRAC_1_SQRT_2;
+        let (pc, px, py) = (c[p], xr[p], yr[p]);
+        // [[α, β], [β, -α]] is its own inverse.
+        let hc = [pc, alpha * px + beta * ax, alpha * py + beta * ay, d[4]];
+        let hx = [beta * px - alpha * ax, sx, d[5], d[6]];
+        let hy = [beta * py - alpha * ay, d[7], sy, d[8]];
+        let (vc, vx, vy) = (unhaar(hc), unhaar(hx), unhaar(hy));
+        for (j, &i) in children(p, k / 2).iter().enumerate() {
+            (c[i], xr[i], yr[i]) = (vc[j], vx[j], vy[j]);
+        }
+    }
 }
 
 /// Indices of parent `p`'s children (top-left, top-right, bottom-left,
@@ -358,6 +547,33 @@ mod tests {
             m /= 2;
         }
         assert!(img[3 * n * n / 4..].iter().all(|v| v.abs() < 1e-10));
+    }
+
+    /// Banding and parallelism must not change a single bit.
+    #[test]
+    fn band_height_and_threads_do_not_change_results() {
+        for l in 0..=8 {
+            let n = 1usize << l;
+            let x: Vec<f64> = (0..n * n)
+                .map(|i| ((i * 37 % 101) as f64 * 0.3).sin())
+                .collect();
+            let mut want = x.clone();
+            forward_banded(&mut want, n, n, false);
+            let mut back = want.clone();
+            inverse_banded(&mut back, n, n, false);
+            for band in (1..=l).map(|b| 1usize << b) {
+                for par in [false, cfg!(feature = "rayon")] {
+                    let mut y = x.clone();
+                    forward_banded(&mut y, n, band, par);
+                    assert_eq!(y, want, "forward n={n} band={band} par={par}");
+                    inverse_banded(&mut y, n, band, par);
+                    assert_eq!(y, back, "inverse n={n} band={band} par={par}");
+                }
+            }
+            for (a, b) in back.iter().zip(&x) {
+                assert!((a - b).abs() < 1e-12);
+            }
+        }
     }
 
     #[test]

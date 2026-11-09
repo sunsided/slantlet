@@ -21,8 +21,9 @@ vanishing moments, and have shorter support than the Daubechies-2 wavelet.
 - O(N) and cache-blocked: 0.6–1.1 billion samples/s on one laptop CPU core;
   see [BENCH.md](BENCH.md) for numbers and the hardware they were measured on.
 - Optional features:
-  - `rayon` parallelises large transforms (frames, separable 2-D, single
-    transforms from 2¹⁹ samples), with bit-identical results.
+  - `rayon` parallelises large transforms (frames, single transforms from
+    2¹⁹ samples, separable 2-D, and planar 2-D from 512×512), with
+    bit-identical results.
   - `wgpu` runs frame-wise transforms as a WGSL compute shader (`f32`, frames
     up to 4096 samples), for host data or for buffers already on the GPU
     (`slantlet::gpu`). It needs Rust 1.87.

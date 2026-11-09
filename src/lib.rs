@@ -278,6 +278,8 @@ mod par_min {
     pub const FRAMES: usize = 1 << 15;
     /// Separable 2-D, in samples.
     pub const SEPARABLE: usize = 1 << 17;
+    /// Planar 2-D, in pixels (512 × 512).
+    pub const PLANAR: usize = 1 << 18;
 }
 
 /// Whether work on `n` samples with threshold `min` should run in parallel.

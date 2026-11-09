@@ -82,6 +82,43 @@ gains 20–50 % (see [BENCH.md](BENCH.md)).
 
 `forward_frames` is fast for the same reason: each frame stays in cache.
 
+## Denoising example
+
+[`examples/denoise.rs`](examples/denoise.rs) runs the experiment of the
+paper's Fig. 6:
+1. add white noise to a piecewise-linear signal;
+2. transform it;
+3. zero every detail coefficient below the universal threshold σ·√(2 ln N);
+4. transform back.
+
+Slantlet details cancel ramps exactly, so the clean signal needs only a few
+coefficients. Because the transform is orthonormal, the noise keeps the same
+σ in every coefficient, and the threshold removes most of it.
+
+![1-D denoising: noisy input, coefficients with the threshold band, result](docs/denoise-1d.svg)
+
+1-D, 1024 samples, σ = 0.1. 81 of 1024 coefficients survive (red, top to
+bottom: coarse to fine scales, dashed lines between scales), and the error
+halves (RMSE 0.099 → 0.048).
+
+![2-D denoising: clean, noisy, coefficient energy, denoised, cycle-spun](docs/denoise-2d.png)
+
+2-D, 128×128, σ = 0.08, using the planar transform, whose details cancel
+planes. From left to right:
+
+1. the piecewise-planar test image;
+2. the noisy image (RMSE 0.080);
+3. detail energy per block on a log scale, arranged coarse (top left) to
+   finest (bottom right). Only edges stand out from the noise.
+4. hard thresholding (204 of 16384 coefficients kept, RMSE 0.042), with the
+   block artifacts typical of a non-redundant transform;
+5. cycle spinning (Coifman & Donoho): denoise all 8×8 shifts and average
+   them, RMSE 0.033.
+
+```sh
+cargo run --release --example denoise   # rewrites docs/denoise-*.{svg,png}
+```
+
 ## Applications
 
 Short, piecewise-linear basis functions localize transients well, which makes

@@ -11,7 +11,7 @@ repository = "https://github.com/sunsided/slantlet"
 documentation = "https://docs.rs/slantlet"
 keywords = ["slantlet", "wavelet", "transform", "dsp", "signal"]
 categories = ["mathematics", "science"]
-exclude = ["fuzz/", ".github/", "release.toml"]
+exclude = ["fuzz/", ".github/", "release.toml", "docs/"]
 
 [lib]
 bench = false # criterion owns `cargo bench` arguments

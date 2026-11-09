@@ -28,7 +28,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo fmt --manifest-path fuzz/Cargo.toml -- --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo doc --no-deps
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -43,6 +44,12 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - run: cargo test
+      # Software Vulkan (lavapipe) so the GPU tests run instead of skipping.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers
+      - run: cargo test --all-features
+        env:
+          SLANTLET_REQUIRE_GPU: "1"
+          WGPU_ADAPTER_NAME: llvmpipe
 
   msrv:
     name: MSRV (1.85, lib only)
@@ -55,7 +62,9 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install 1.85 --profile minimal && rustup default 1.85
       # Dev-dependencies (proptest, criterion) need a newer Rust; the library itself does not.
+      # The optional `wgpu` feature follows wgpu's own MSRV (1.87) and is not checked here.
       - run: cargo check --lib
+      - run: cargo check --lib --features rayon
 
   fuzz:
     name: Fuzz targets build (nightly)
